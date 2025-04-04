@@ -1,10 +1,8 @@
 const { google } = require('googleapis');
 const { Client } = require('@notionhq/client');
 const { JWT } = require('google-auth-library');
-const fs = require('fs');
 const axios = require('axios');
 const { Octokit } = require("@octokit/rest");
-
 
 const GOOGLE_CREDS = require('./your-google-creds.json');
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
@@ -17,9 +15,7 @@ const GITHUB_REPO = process.env.GITHUB_REPO;
 
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
-// Function to convert Google Drive link to direct URL
 const convertGDriveLink = (url) => {
-  // Assumes URL format: https://drive.google.com/file/d/FILE_ID/view?usp=sharing
   const fileIdMatch = url.match(/[-\w]{25,}/);
   if (!fileIdMatch) {
     throw new Error('Invalid Google Drive URL');
@@ -28,14 +24,11 @@ const convertGDriveLink = (url) => {
   return `https://drive.google.com/uc?export=view&id=${fileId}`;
 };
 
-// Function to download an image from a URL and upload it to GitHub
 async function uploadImageToGithub(url, filePath) {
   try {
-    // Download image data as an arraybuffer
     const response = await axios.get(url, { responseType: 'arraybuffer' });
     const content = Buffer.from(response.data, 'binary').toString('base64');
 
-    // Upload the file to GitHub. This will create or update the file.
     const res = await octokit.repos.createOrUpdateFileContents({
       owner: GITHUB_OWNER,
       repo: GITHUB_REPO,
@@ -43,7 +36,7 @@ async function uploadImageToGithub(url, filePath) {
       message: `Add image ${filePath}`,
       content,
     });
-    // Return the download URL from GitHub (raw file URL)
+
     return res.data.content.download_url;
   } catch (err) {
     console.error("Error uploading image to GitHub:", err);
@@ -51,7 +44,6 @@ async function uploadImageToGithub(url, filePath) {
   }
 }
 
-// Property types for Notion
 const propertyTypes = {
   'picked?': 'checkbox',
   'time': 'date',
@@ -74,7 +66,6 @@ const propertyTypes = {
 };
 
 async function main() {
-  // Initialize Google Sheets API
   const auth = new JWT({
     email: GOOGLE_CREDS.client_email,
     key: GOOGLE_CREDS.private_key,
@@ -83,7 +74,6 @@ async function main() {
 
   const sheets = google.sheets({ version: 'v4', auth });
 
-  // Get data from the spreadsheet
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: 'test!A1:Z',
@@ -91,12 +81,11 @@ async function main() {
 
   const [headers, ...rows] = response.data.values;
 
-  // Initialize Notion client
   const notion = new Client({ auth: NOTION_TOKEN });
 
-  // Process each row from the spreadsheet
   for (const row of rows) {
     const properties = {};
+    const embeddedImages = {}; // Store URLs to embed later
 
     for (let i = 0; i < headers.length; i++) {
       const key = headers[i];
@@ -121,14 +110,14 @@ async function main() {
 
         case 'files':
           try {
-            // Convert the Google Drive URL to a direct URL
             const directUrl = convertGDriveLink(value);
-            // Create a unique file path. You can adjust the naming as needed.
-            const fileExtension = '.jpg'; // Change as needed based on your file type
+            const fileExtension = '.jpg';
             const fileName = `${key}_${Date.now()}${fileExtension}`;
             const filePath = `images/${fileName}`;
-            // Upload image to GitHub and retrieve the raw URL
             const githubUrl = await uploadImageToGithub(directUrl, filePath);
+
+            embeddedImages[key] = githubUrl;
+
             properties[key] = {
               files: [{
                 type: 'external',
@@ -173,11 +162,42 @@ async function main() {
       }
     }
 
-    // Create a page in Notion with the properties
-    await notion.pages.create({
+    const createdPage = await notion.pages.create({
       parent: { database_id: DATABASE_ID },
       properties
     });
+
+    // Embed images in the page content
+    const blocks = [];
+
+    if (embeddedImages.headshotUrl) {
+      blocks.push({
+        object: 'block',
+        type: 'image',
+        image: {
+          type: 'external',
+          external: { url: embeddedImages.headshotUrl }
+        }
+      });
+    }
+
+    if (embeddedImages.bodyPhotoUrl) {
+      blocks.push({
+        object: 'block',
+        type: 'image',
+        image: {
+          type: 'external',
+          external: { url: embeddedImages.bodyPhotoUrl }
+        }
+      });
+    }
+
+    if (blocks.length > 0) {
+      await notion.blocks.children.append({
+        block_id: createdPage.id,
+        children: blocks
+      });
+    }
   }
 }
 
