@@ -65,11 +65,11 @@ async function downloadImage(url) {
   }
 }
 
-// Function to upload images to GitHub in batches
+//Function to upload images to GitHub in batches
 async function uploadImagesToGithub(images) {
   if (!images.length) return {};
 
-  const branch = 'main';
+  const branch = 'master';
   const commitMessage = 'Add user submission images';
   const basePath = 'images/submissions/';
 
@@ -253,11 +253,47 @@ async function processBatch(batch, headers) {
               break;
             case 'date':
               try {
-                const [d, t] = value.split(' ');
-                const [day, month, year] = d.split('.');
-                properties[key] = { date: { start: `${year}-${month}-${day}T${t || '00:00'}` } };
+                // Handle empty or invalid values
+                if (!value || typeof value !== 'string') {
+                  console.warn(`Invalid date value for ${key}: ${value}`);
+                  break;
+                }
+
+                // Split date and time parts
+                const [datePart, timePart = '00:00'] = value.trim().split(' ');
+
+                // Handle different date formats
+                let day, month, year;
+                if (datePart.includes('.')) {
+                  [day, month, year] = datePart.split('.');
+                } else if (datePart.includes('/')) {
+                  [day, month, year] = datePart.split('/');
+                } else if (datePart.includes('-')) {
+                  [year, month, day] = datePart.split('-');
+                } else {
+                  throw new Error(`Unsupported date format: ${datePart}`);
+                }
+
+                // Pad single digits with leading zeros
+                day = day.padStart(2, '0');
+                month = month.padStart(2, '0');
+
+                // Validate date components
+                if (!day || !month || !year || isNaN(day) || isNaN(month) || isNaN(year)) {
+                  throw new Error(`Invalid date components: ${day}.${month}.${year}`);
+                }
+
+                // Format time part
+                const [hours = '00', minutes = '00', seconds = '00'] = timePart.split(':');
+                const formattedTime = `${hours.padEnd(2, '0')}:${minutes.padEnd(2, '0')}`;
+
+                properties[key] = {
+                  date: {
+                    start: `${year}-${month}-${day}T${formattedTime}`
+                  }
+                };
               } catch (err) {
-                console.warn(`Invalid date format for ${key}: ${value}`);
+                console.warn(`Invalid date format for ${key}: ${value}`, err.message);
               }
               break;
             case 'multi_select':
@@ -349,11 +385,24 @@ async function main() {
 
     const sheets = google.sheets({ version: 'v4', auth });
 
-    // Fetch all data from Google Sheets
+    // First, get the sheet metadata to determine the actual range
+    const metadata = await sheets.spreadsheets.get({
+      spreadsheetId: SPREADSHEET_ID,
+      ranges: [],
+      includeGridData: false
+    });
+
+    // Get the first sheet's properties
+    const sheet = metadata.data.sheets[0];
+    const lastRow = sheet.properties.gridProperties.rowCount;
+    const lastColumn = sheet.properties.gridProperties.columnCount;
+    const columnLetter = String.fromCharCode(64 + lastColumn); // Convert column number to letter
+
+    // Fetch all data from Google Sheets with the correct range
     console.log('Fetching data from Google Sheets...');
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'A1:Z', // Adjust range as needed
+      range: `A1:${columnLetter}${lastRow}`,
       majorDimension: 'ROWS'
     });
 
@@ -362,19 +411,25 @@ async function main() {
     }
 
     const [headers, ...rows] = res.data.values;
-    console.log(`Found ${rows.length} rows to process`);
+    const totalRows = rows.length;
+    console.log(`Found ${totalRows} rows to process`);
 
     // Process in batches to avoid memory issues and rate limiting
     const batchSize = 20; // Adjust based on your needs
     let successCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
+    let processedCount = 0;
 
-    for (let i = 0; i < rows.length; i += batchSize) {
+    for (let i = 0; i < totalRows; i += batchSize) {
       const batch = rows.slice(i, i + batchSize);
-      console.log(`Processing batch ${Math.ceil(i / batchSize) + 1} of ${Math.ceil(rows.length / batchSize)}...`);
+      const batchNumber = Math.floor(i / batchSize) + 1;
+      const totalBatches = Math.ceil(totalRows / batchSize);
+
+      console.log(`Processing batch ${batchNumber} of ${totalBatches} (rows ${i + 1}-${Math.min(i + batchSize, totalRows)} of ${totalRows})...`);
 
       const results = await processBatch(batch, headers);
+      processedCount += batch.length;
 
       results.forEach(result => {
         if (result.status === 'success') successCount++;
@@ -383,10 +438,13 @@ async function main() {
       });
 
       // Add delay between batches to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      if (i + batchSize < totalRows) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
     }
 
     console.log('\n🎉 Processing complete!');
+    console.log(`Total rows processed: ${processedCount}`);
     console.log(`✅ Success: ${successCount}`);
     console.log(`⏭ Skipped: ${skippedCount}`);
     console.log(`❌ Failed: ${failedCount}`);
