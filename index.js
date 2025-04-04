@@ -65,6 +65,22 @@ const propertyTypes = {
   'Укажите ваш Instagram': 'rich_text'
 };
 
+async function userExistsInNotion(notion, telegramHandle) {
+  if (!telegramHandle) return false;
+
+  const response = await notion.databases.query({
+    database_id: DATABASE_ID,
+    filter: {
+      property: 'Ваш ник в Телеграм',
+      rich_text: {
+        equals: telegramHandle
+      }
+    }
+  });
+
+  return response.results.length > 0;
+}
+
 async function main() {
   const auth = new JWT({
     email: GOOGLE_CREDS.client_email,
@@ -85,7 +101,8 @@ async function main() {
 
   for (const row of rows) {
     const properties = {};
-    const embeddedImages = {}; // Store URLs to embed later
+    const embeddedImages = {};
+    let telegramHandle = '';
 
     for (let i = 0; i < headers.length; i++) {
       const key = headers[i];
@@ -94,6 +111,10 @@ async function main() {
 
       const propType = propertyTypes[key];
       if (!propType) continue;
+
+      if (key === 'Ваш ник в Телеграм') {
+        telegramHandle = value.trim();
+      }
 
       switch (propType) {
         case 'checkbox':
@@ -162,12 +183,22 @@ async function main() {
       }
     }
 
+    if (!telegramHandle) {
+      console.warn('Skipping row due to missing Telegram handle.');
+      continue;
+    }
+
+    const alreadyExists = await userExistsInNotion(notion, telegramHandle);
+    if (alreadyExists) {
+      console.log(`Skipping existing user: ${telegramHandle}`);
+      continue;
+    }
+
     const createdPage = await notion.pages.create({
       parent: { database_id: DATABASE_ID },
       properties
     });
 
-    // Embed images in the page content
     const blocks = [];
 
     if (embeddedImages.headshotUrl) {
@@ -198,6 +229,8 @@ async function main() {
         children: blocks
       });
     }
+
+    console.log(`Added new user: ${telegramHandle}`);
   }
 }
 
